@@ -1,7 +1,21 @@
-const axios = require('./node_modules/axios/index.d.cts');
+const axios = require('axios').default;
 const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const winston = require('winston')
+
+const logger = winston.createLogger({
+    level: "info",
+    format: winston.format.combine(
+        winston.format.timestamp(),
+        winston.format.printf(({ timestamp, level, message }) => `${timestamp} [${level.toUpperCase()}]: ${message}`)
+    ),
+    transports: [
+        new winston.transports.Console(),
+        new winston.transports.File({ filename: 'migrate.log' })
+    ]
+});
+
 
 // Getting the environment variables
 const GITLAB_TOKEN = process.env.GITLAB_TOKEN;
@@ -10,14 +24,14 @@ const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const GITHUB_ORG = process.env.GITHUB_ORG;
 
 if (!GITLAB_TOKEN || !GITHUB_TOKEN || !GITLAB_GROUP || !GITHUB_ORG) {
-    console.error("Error: Not all environment variables are configured");
+    logger.error("Error: Not all environment variables are configured");
     process.exit(1);
 }
 
 // Reading the list of repositories from the repo.txt file
 const REPO_LIST_FILE = path.join(__dirname, 'repo.txt');
 if (!fs.existsSync(REPO_LIST_FILE)) {
-    console.error(`Error: File ${REPO_LIST_FILE} not found`);
+    logger.error(`Error: File ${REPO_LIST_FILE} not found`);
     process.exit(1);
 }
 
@@ -27,7 +41,7 @@ const REPO_NAMES = fs.readFileSync(REPO_LIST_FILE, 'utf8')
     .filter(repo => repo.length > 0);
 
 if (REPO_NAMES.length === 0) {
-    console.error("Error: File repo.txt is empty");
+    logger.error("Error: File repo.txt is empty");
     process.exit(1);
 }
 
@@ -37,7 +51,7 @@ const GITHUB_API = `https://api.github.com/user/repos`;
 
 // Getting a list of repositories from GitLab
 async function getGitLabRepos() {
-    console.log("Getting a list of repositories from GitLab...");
+    logger.info("Getting a list of repositories from GitLab...");
     try {
         const response = await axios.get(GITLAB_API, {
             headers: { "PRIVATE-TOKEN": GITLAB_TOKEN },
@@ -47,13 +61,14 @@ async function getGitLabRepos() {
             if (REPO_NAMES.includes(repo.name)) {
                 acc.push({
                     name: repo.name,
-                    gitlab_url: repo.http_url_to_repo
+                    gitlab_url: repo.http_url_to_repo,
+                    correct_path: repo.path_with_namespace
                 });
             }
             return acc;
         }, []);
     } catch (error) {
-        console.error("Fetching repositories from GitLab failed:", error.message);
+        logger.error("Fetching repositories from GitLab failed:", error);
         process.exit(1);
     }
 }
@@ -64,20 +79,20 @@ async function checkGitHubRepoExists(repoName) {
         await axios.get(`https://api.github.com/repos/${GITHUB_ORG}/${repoName}`, {
             headers: { Authorization: `token ${GITHUB_TOKEN}` }
         });
-        console.log(`Repository ${repoName} already exists on GitHub. Skip...`);
+        logger.warn(`Repository ${repoName} already exists on GitHub. Skip...`);
         return true;
     } catch (error) {
         if (error.response && error.response.status === 404) {
             return false; // No repository → you can migrate
         }
-        console.error(`Repository checkout error ${repoName} in GitHub:`, error.message);
+        logger.error(`Repository checkout error ${repoName} in GitHub:`, error);
         process.exit(1);
     }
 }
 
 // Create a repository on GitHub
 async function createGitHubRepo(repoName) {
-    console.log(`Create a repository ${repoName} in GitHub...`);
+    logger.info(`Create a repository ${repoName} in GitHub...`);
     try {
         await axios.post(
             GITHUB_API,
@@ -90,14 +105,14 @@ async function createGitHubRepo(repoName) {
             console.log(`Repository ${repoName} already exists on GitHub. Skip...`);
             return `https://github.com/${GITHUB_ORG}/${repoName}.git`;
         }
-        console.error(`Error creating a repository ${repoName} in GitHub:`, error.message);
+        logger.error(`Error creating a repository ${repoName} in GitHub:`, error);
         process.exit(1);
     }
 }
 
 // Migrate the repository
 async function migrateRepo(repo) {
-    console.log(`Starting the migration ${repo.name}...`);
+    logger.info(`Starting the migration ${repo.name}...`);
 
     // Check if the repository is already on GitHub
     const existsOnGitHub = await checkGitHubRepoExists(repo.name);
@@ -110,17 +125,18 @@ async function migrateRepo(repo) {
 
     const localPath = path.join(__dirname, repo.name);
     try {
-        console.log(`Clonning ${repo.name}...`);
-        execSync(`git clone --mirror ${repo.gitlab_url} ${localPath}`, { stdio: 'inherit' });
+        logger.info(`Clonning ${repo.name}...`);
+        const gitlabUrlWithToken = repo.gitlab_url.replace("https://", `https://oauth2:${GITLAB_TOKEN}@`);
+        execSync(`git clone --mirror ${gitlabUrlWithToken} ${localPath}`, { stdio: 'inherit' });
 
-        console.log(`Download ${repo.name} in GitHub...`);
+        logger.info(`Download ${repo.name} in GitHub...`);
         execSync(`cd ${localPath} && git remote set-url --push origin ${gitHubUrl} && git push --mirror`, { stdio: 'inherit' });
 
         fs.rmSync(localPath, { recursive: true, force: true });
 
-        console.log(`Repository ${repo.name} successfully transferred!`);
+        logger.info(`Repository ${repo.name} successfully transferred!`);
     } catch (error) {
-        console.error(`Migration error ${repo.name}:`, error.message);
+        logger.error(`Migration error ${repo.name}:`, error);
     }
 }
 
@@ -128,7 +144,7 @@ async function migrateRepo(repo) {
 (async () => {
     const repos = await getGitLabRepos();
     if (repos.length === 0) {
-        console.log("No repositories for migration");
+        logger.warn("No repositories for migration");
         process.exit(0);
     }
 
@@ -136,6 +152,6 @@ async function migrateRepo(repo) {
         await migrateRepo(repo);
     }
 
-    console.log("Selected repositories have been successfully migrated");
+    logger.info("Selected repositories have been successfully migrated");
 })();
 

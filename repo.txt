@@ -1,2 +1,3 @@
-bestrong
-photo-print
+firstproject
+intershiproject
+intership-project
